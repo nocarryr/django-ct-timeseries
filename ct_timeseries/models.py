@@ -70,6 +70,7 @@ class TimeInterval(models.Model):
         return self.name
         
 class TimeSeries(models.Model):
+    name = models.CharField(max_length=100, blank=True, null=True)
     interval = models.ForeignKey(TimeInterval)
     @property
     def interval_gte_day(self):
@@ -113,12 +114,17 @@ class TimeSeries(models.Model):
             r = self.add_date_period()
             if r is False:
                 complete = True
+    def __unicode__(self):
+        if self.name:
+            return self.name
+        return super(TimeSeries, self).__unicode__()
     
 VALUE_TYPE_MAP = {
     'int':int, 
     'float':float, 
     'str':str, 
 }
+
 class ValueSource(models.Model):
     name = models.CharField(max_length=100, blank=True, null=True)
     time_series = models.ForeignKey(TimeSeries, related_name='value_sources')
