@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from timeseries_ct.models import TimeInterval, \
+from ct_timeseries.models import TimeInterval, \
                                  TimeSeries, \
                                  ValueSource, \
                                  DatePeriod, \
