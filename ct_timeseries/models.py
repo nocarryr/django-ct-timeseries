@@ -61,12 +61,13 @@ class TimeInterval(models.Model):
             datetime.datetime.combine(date, start_t), 
             datetime.datetime.combine(date, end_t)
         ]
+        dtrange = [UTC.localize(dt) for dt in dtrange]
         return dtrange
     def clean(self):
         if self.interval_value == 0:
             raise ValidationError('interval_value must be a positive number')
     def __unicode__(self):
-        return u'%s (%s minutes)' % (self.name, self.minutes)
+        return self.name
         
 class TimeSeries(models.Model):
     interval = models.ForeignKey(TimeInterval)
@@ -81,18 +82,37 @@ class TimeSeries(models.Model):
         if start_date is None:
             if self.date_periods.count():
                 start_date = self.date_periods.latest('date').date
-            else:
-                return None
-        if self.interval_gte_day:
-            dtrange = self.interval.get_datetime_range(self.date, 0)
-            return dtrange[1].date()
-        return start_date + DAY
+        vobj_dates = []
+        for value_source in self.value_sources.all():
+            d = value_source.get_next_date(start_date)
+            if d is None:
+                continue
+            if isinstance(d, datetime.datetime):
+                if d.tzinfo is None:
+                    d = UTC.localize(d)
+                d = d.date()
+            vobj_dates.append(d)
+        if not len(vobj_dates):
+            return None
+        next_date = min(vobj_dates)
+        if self.date_periods.filter(date=next_date).exists():
+            next_date += DAY
+        return next_date
     def add_date_period(self, date=None):
         if date is None:
             date = self.get_next_date()
+        if date is None:
+            return False
         dobj = DatePeriod(series=self, date=date)
         dobj.save()
         dobj.build_time_periods()
+        return True
+    def update_data(self):
+        complete = False
+        while not complete:
+            r = self.add_date_period()
+            if r is False:
+                complete = True
     
 VALUE_TYPE_MAP = {
     'int':int, 
@@ -111,6 +131,7 @@ class ValueSource(models.Model):
                                   ), default='int')
     value_lookup = models.CharField(max_length=100)
     value_lookup_extra_args = models.CharField(max_length=100, blank=True, null=True)
+    next_valid_date_lookup = models.CharField(max_length=100)
     def get_value_for_datetime_range(self, dtrange):
         vlookup = getattr(self.source_model, self.value_lookup)
         args = [dtrange]
@@ -120,6 +141,9 @@ class ValueSource(models.Model):
                 extra_args = [arg.strip() for arg in args.split(',')]
             args.extend(extra_args)
         return vlookup(*args)
+    def get_next_date(self, start_date=None):
+        lookup = getattr(self.source_model, self.next_valid_date_lookup)
+        return lookup(start_date)
     def __unicode__(self):
         if self.name is None:
             if self.source_model is not None:
@@ -205,4 +229,8 @@ class TimeValue(models.Model):
         do_save()
     
 
-    
+def update_series(queryset=None):
+    if queryset is None:
+        queryset = TimeSeries.objects.all()
+    for series in queryset:
+        series.update_data()
