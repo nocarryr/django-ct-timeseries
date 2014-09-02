@@ -103,6 +103,8 @@ class TimeSeries(models.Model):
         dobj = DatePeriod(series=self, date=date)
         dobj.save()
         dobj.build_time_periods()
+        if not dobj.time_periods.count():
+            dobj.delete()
         return True
     def update_data(self):
         complete = False
@@ -167,6 +169,8 @@ class DatePeriod(models.Model):
                 pobj = TimePeriod(date_period=self, time_index=index)
                 pobj.save()
             pobj.build_values()
+            if not pobj.values.count():
+                pobj.delete()
     def __unicode__(self):
         return unicode(self.date)
     
@@ -197,6 +201,8 @@ class TimePeriod(models.Model):
             except TimeValue.DoesNotExist:
                 vobj = TimeValue(period=self, value_source=value_source)
                 vobj.save()
+            if vobj.db_value is None:
+                vobj.delete()
     def __unicode__(self):
         return u'-'.join([unicode(dt) for dt in self.datetime_range])
 
