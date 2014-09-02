@@ -55,14 +55,10 @@ class TimeInterval(models.Model):
             s = int(s)
             ms = 0
         td = datetime.timedelta(seconds=s, microseconds=ms)
-        start_t = MIDNIGHT + td
-        end_t = start_t + td
-        dtrange = [
-            datetime.datetime.combine(date, start_t), 
-            datetime.datetime.combine(date, end_t)
-        ]
-        dtrange = [UTC.localize(dt) for dt in dtrange]
-        return dtrange
+        start_dt = UTC.localize(datetime.datetime.combine(date, MIDNIGHT))
+        start_dt += td
+        end_dt = start_dt + td
+        return [start_dt, end_dt]
     def clean(self):
         if self.interval_value == 0:
             raise ValidationError('interval_value must be a positive number')
@@ -139,7 +135,7 @@ class ValueSource(models.Model):
     value_lookup_extra_args = models.CharField(max_length=100, blank=True, null=True)
     next_valid_date_lookup = models.CharField(max_length=100)
     def get_value_for_datetime_range(self, dtrange):
-        vlookup = getattr(self.source_model, self.value_lookup)
+        vlookup = getattr(self.source_model.model_class(), self.value_lookup)
         args = [dtrange]
         extra_args = self.value_lookup_extra_args
         if extra_args:
@@ -148,7 +144,7 @@ class ValueSource(models.Model):
             args.extend(extra_args)
         return vlookup(*args)
     def get_next_date(self, start_date=None):
-        lookup = getattr(self.source_model, self.next_valid_date_lookup)
+        lookup = getattr(self.source_model.model_class(), self.next_valid_date_lookup)
         return lookup(start_date)
     def __unicode__(self):
         if self.name is None:
@@ -161,6 +157,8 @@ class ValueSource(models.Model):
 class DatePeriod(models.Model):
     series = models.ForeignKey(TimeSeries, related_name='date_periods')
     date = models.DateField()
+    class Meta:
+        ordering = ['date']
     def build_time_periods(self):
         for index, period in self.series.interval.iter_periods():
             try:
@@ -175,6 +173,8 @@ class DatePeriod(models.Model):
 class TimePeriod(models.Model):
     date_period = models.ForeignKey(DatePeriod, related_name='time_periods')
     time_index = models.PositiveIntegerField()
+    class Meta:
+        ordering = ['date_period', 'time_index']
     @property
     def series(self):
         return self.date_period.series
@@ -197,11 +197,15 @@ class TimePeriod(models.Model):
             except TimeValue.DoesNotExist:
                 vobj = TimeValue(period=self, value_source=value_source)
                 vobj.save()
+    def __unicode__(self):
+        return u'-'.join([unicode(dt) for dt in self.datetime_range])
 
 class TimeValue(models.Model):
     period = models.ForeignKey(TimePeriod, related_name='values')
     value_source = models.ForeignKey(ValueSource, related_name='values')
     db_value = models.CharField(max_length=100, null=True)
+    class Meta:
+        ordering = ['period']
     @property
     def value(self):
         if not hasattr(self, '_value'):
@@ -233,6 +237,11 @@ class TimeValue(models.Model):
         if self.db_value is None:
             self.get_value_from_source(do_save=False)
         do_save()
+    def __unicode__(self):
+        name = self.value_source.name
+        if name is None:
+            name = self.value_source.source_model.model_class().__name__
+        return u': '.join([name, unicode(self.db_value)])
     
 
 def update_series(queryset=None):
