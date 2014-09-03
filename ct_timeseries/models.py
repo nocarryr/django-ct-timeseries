@@ -105,6 +105,7 @@ class TimeSeries(models.Model):
         dobj.build_time_periods()
         if not dobj.time_periods.count():
             dobj.delete()
+        del dobj
         return True
     def update_data(self):
         complete = False
@@ -171,6 +172,7 @@ class DatePeriod(models.Model):
             pobj.build_values()
             if not pobj.values.count():
                 pobj.delete()
+            del pobj
     def __unicode__(self):
         return unicode(self.date)
     
@@ -203,6 +205,7 @@ class TimePeriod(models.Model):
                 vobj.save()
             if vobj.db_value is None:
                 vobj.delete()
+            del vobj
     def __unicode__(self):
         return u'-'.join([unicode(dt) for dt in self.datetime_range])
 
