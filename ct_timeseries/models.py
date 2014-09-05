@@ -2,6 +2,9 @@ import datetime
 import pytz
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import ProtectedError
+from django.db.models.signals import pre_delete, post_delete
+from django.dispatch import receiver
 from django.contrib.contenttypes.models import ContentType
 
 MINUTE = datetime.timedelta(minutes=1)
@@ -67,7 +70,7 @@ class TimeInterval(models.Model):
         
 class TimeSeries(models.Model):
     name = models.CharField(max_length=100, blank=True, null=True)
-    interval = models.ForeignKey(TimeInterval)
+    interval = models.ForeignKey(TimeInterval, related_name='time_series')
     @property
     def interval_gte_day(self):
         v = getattr(self, '_interval_gte_day', None)
@@ -92,8 +95,10 @@ class TimeSeries(models.Model):
         if not len(vobj_dates):
             return None
         next_date = min(vobj_dates)
+        if start_date is not None and next_date <= start_date:
+            return self.get_next_date(next_date + DAY)
         if self.date_periods.filter(date=next_date).exists():
-            next_date += DAY
+            return self.get_next_date(next_date + DAY)
         return next_date
     def add_date_period(self, date=None):
         if date is None:
@@ -105,9 +110,6 @@ class TimeSeries(models.Model):
         dobj = DatePeriod(series=self, date=date)
         dobj.save()
         dobj.build_time_periods()
-        if not dobj.time_periods.count():
-            dobj.delete()
-        del dobj
         return True
     def update_data(self):
         complete = False
@@ -119,6 +121,14 @@ class TimeSeries(models.Model):
         if self.name:
             return self.name
         return super(TimeSeries, self).__unicode__()
+@receiver(pre_delete, sender=TimeInterval)
+def on_timeinterval_pre_delete(sender, **kwargs):
+    time_interval = kwargs.get('instance')
+    q = time_interval.time_series.all()
+    if q.exists():
+        msg = 'Cannot delete TimeInterval "%s". It is in use by the following TimeSeries objects: %s'
+        msg = msg % (time_interval, list(q))
+        raise ProtectedError(msg, q)
     
 VALUE_TYPE_MAP = {
     'int':int, 
@@ -178,6 +188,12 @@ class DatePeriod(models.Model):
     def __unicode__(self):
         return unicode(self.date)
     
+@receiver(pre_delete, sender=TimeSeries)
+def on_timeseries_pre_delete(sender, **kwargs):
+    time_series = kwargs.get('instance')
+    time_series.date_periods.all().delete()
+    time_series.value_sources.all().delete()
+    
 class TimePeriod(models.Model):
     date_period = models.ForeignKey(DatePeriod, related_name='time_periods')
     time_index = models.PositiveIntegerField()
@@ -211,6 +227,11 @@ class TimePeriod(models.Model):
     def __unicode__(self):
         return u'-'.join([unicode(dt) for dt in self.datetime_range])
 
+@receiver(pre_delete, sender=DatePeriod)
+def on_dateperiod_pre_delete(sender, **kwargs):
+    date_period = kwargs.get('instance')
+    date_period.time_periods.all().delete()
+    
 class TimeValue(models.Model):
     period = models.ForeignKey(TimePeriod, related_name='values')
     value_source = models.ForeignKey(ValueSource, related_name='values')
@@ -253,7 +274,26 @@ class TimeValue(models.Model):
         if name is None:
             name = self.value_source.source_model.model_class().__name__
         return u': '.join([name, unicode(self.db_value)])
+
+@receiver(pre_delete, sender=TimePeriod)
+def on_timeperiod_pre_delete(sender, **kwargs):
+    time_period = kwargs.get('instance')
+    time_period.values.all().delete()
     
+@receiver(pre_delete, sender=ValueSource)
+def on_valuesource_pre_delete(sender, **kwargs):
+    value_source = kwargs.get('instance')
+    value_source.values.all().delete()
+    
+@receiver(post_delete, sender=TimeValue)
+def on_timevalue_post_delete(sender, **kwargs):
+    time_value = kwargs.get('instance')
+    try:
+        period = time_value.period
+    except TimePeriod.DoesNotExist:
+        return
+    if not period.values.exclude(id=time_value.id).exists():
+        period.delete()
 
 def update_series(queryset=None):
     if queryset is None:
