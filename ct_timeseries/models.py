@@ -100,6 +100,8 @@ class TimeSeries(models.Model):
             date = self.get_next_date()
         if date is None:
             return False
+        if DatePeriod.objects.filter(series=self, date=date).exists():
+            return True
         dobj = DatePeriod(series=self, date=date)
         dobj.save()
         dobj.build_time_periods()
