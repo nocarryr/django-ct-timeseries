@@ -18,6 +18,28 @@ INTERVAL_MAP = {
     'minutes':60, 
     'hours':3600, 
 }
+
+_LOG_FILENAME = None
+_LOG_ENABLE = False
+_LOG_DT_FMT = '%Y%m%d-%H:%M:%S.%f'
+def LOG(*args):
+    global _LOG_FILENAME, _LOG_ENABLE
+    if _LOG_FILENAME is not None:
+        if not _LOG_ENABLE:
+            _LOG_ENABLE = True
+    if not _LOG_ENABLE:
+        return
+    now = datetime.datetime.now()
+    entry = [now.strftime(_LOG_DT_FMT)]
+    entry.extend([str(arg) for arg in args])
+    entry = '\t'.join(entry)
+    if _LOG_FILENAME == 'stdout':
+        print entry
+    else:
+        with open(_LOG_FILENAME, 'a') as f:
+            f.write('%s\t' % (entry))
+    
+
 class TimeInterval(models.Model):
     name = models.CharField(max_length=30, unique=True)
     interval_unit = models.CharField(
@@ -78,38 +100,78 @@ class TimeSeries(models.Model):
             period = self.interval.period
             v = self._interval_gte_day = period >= 86400
         return v
-    def get_next_date(self, start_date=None):
-        if start_date is None:
+    def get_next_datetime(self, start_dt=None, return_if_equal=False):
+        original_start_dt = start_dt
+        if start_dt is None:
             if self.date_periods.count():
-                start_date = self.date_periods.latest('date').date
-        vobj_dates = []
+                start_date = self.date_periods.latest('date').date + DAY
+                start_dt = UTC.localize(datetime.datetime.combine(start_date, MIDNIGHT))
+        elif isinstance(start_dt, datetime.date):
+            start_dt = UTC.localize(datetime.datetime.combine(start_dt, MIDNIGHT))
+            original_start_dt = start_dt
+        vobj_dt = []
         for value_source in self.value_sources.all():
-            d = value_source.get_next_date(start_date)
-            if d is None:
+            dt = value_source.get_next_datetime(start_dt)
+            if dt is None:
                 continue
-            if isinstance(d, datetime.datetime):
-                if d.tzinfo is None:
-                    d = UTC.localize(d)
-                d = d.date()
-            vobj_dates.append(d)
-        if not len(vobj_dates):
+            if dt.tzinfo is None:
+                dt = UTC.localize(dt)
+            else:
+                dt = UTC.normalize(dt)
+            vobj_dt.append(dt)
+        if not len(vobj_dt):
             return None
-        next_date = min(vobj_dates)
-        if start_date is not None and next_date <= start_date:
-            return self.get_next_date(next_date + DAY)
-        if self.date_periods.filter(date=next_date).exists():
-            return self.get_next_date(next_date + DAY)
-        return next_date
+        if start_dt is not None:
+            LOG('start_dt: %s' % (start_dt))
+            next_dt = None
+            for dt in sorted(vobj_dt):
+                if dt.date() < start_dt.date():
+                    continue
+                next_dt = dt
+                LOG('next_dt from vobj: %s' % (next_dt))
+                break
+            if next_dt is None:
+                next_dt = min(vobj_dt)
+            if original_start_dt is not None:
+                if next_dt.date() < original_start_dt.date():
+                    next_dt = original_start_dt.date() + DAY
+                    LOG('next_dt(lt): %s' % (next_dt))
+                    return self.get_next_datetime(next_dt)
+            return next_dt
+        else:
+            next_dt = min(vobj_dt)
+        LOG('next_dt: %s' % (next_dt))
+        if self.date_periods.filter(date=next_dt.date()).exists():
+            next_dt += DAY
+            LOG('next_dt(in_db): %s' % (next_dt))
+            return self.get_next_datetime(next_dt)
+        LOG('next_dt(no_change): %s' % (next_dt))
+        return next_dt
     def add_date_period(self, date=None):
         if date is None:
-            date = self.get_next_date()
-        if date is None:
+            dt = self.get_next_datetime()
+            LOG('retrieved %s' % (dt))
+        if dt is None:
             return False
-        if DatePeriod.objects.filter(series=self, date=date).exists():
-            return True
+        date = dt.date()
+        q = DatePeriod.objects.filter(series=self)
+        if q.filter(date=date).exists():
+            LOG('add_date_period: date %s exists' % (date))
+            while q.filter(date=date).exists():
+                date += DAY
+                dt = self.get_next_datetime(date)
+                if dt is None:
+                    return False
+                date = dt.date()
+            LOG('add_date_period: new date: %s' % (date))
         dobj = DatePeriod(series=self, date=date)
         dobj.save()
+        LOG('%s building time_periods' % (dobj))
         dobj.build_time_periods()
+        if dobj.time_periods.count():
+            LOG('*******************')
+        else:
+            LOG('-------------------')
         return True
     def update_data(self):
         complete = False
@@ -158,9 +220,9 @@ class ValueSource(models.Model):
                 extra_args = [arg.strip() for arg in args.split(',')]
             args.extend(extra_args)
         return vlookup(*args)
-    def get_next_date(self, start_date=None):
+    def get_next_datetime(self, start_dt=None):
         lookup = getattr(self.source_model.model_class(), self.next_valid_date_lookup)
-        return lookup(start_date)
+        return lookup(start_dt)
     def __unicode__(self):
         if self.name is None:
             if self.source_model is not None:
@@ -295,7 +357,10 @@ def on_timevalue_post_delete(sender, **kwargs):
     if not period.values.exclude(id=time_value.id).exists():
         period.delete()
 
-def update_series(queryset=None):
+def update_series(queryset=None, log_filename=None):
+    global _LOG_FILENAME
+    if log_filename is not None:
+        _LOG_FILENAME = log_filename
     if queryset is None:
         queryset = TimeSeries.objects.all()
     for series in queryset:
